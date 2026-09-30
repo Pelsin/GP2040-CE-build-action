@@ -4,6 +4,8 @@ A composite GitHub Action that builds [GP2040-CE](https://github.com/OpenStickCo
 
 The action takes care of cmake, the `arm-none-eabi-gcc` toolchain, `pico-sdk`, building the web configurator (optional) and the CMake configure and build.
 
+This release pins **pico-sdk 2.1.1** (via [`Fortinbra/RaspberryPiPicoBuild@v7`](https://github.com/Fortinbra/RaspberryPiPicoBuild), the same setup GP2040-CE v0.7.12 uses). Use the action release that matches the pico-sdk your GP2040-CE version needs.
+
 ## Inputs
 
 | Input | Required | Default | Description |
