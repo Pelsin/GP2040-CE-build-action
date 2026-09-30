@@ -1,0 +1,156 @@
+name: 'GP2040-CE Build Action'
+description: 'Builds GP2040-CE firmware (.uf2) for a board config, either from an existing checkout or from a GP2040-CE release tag + config'
+
+inputs:
+  board-config:
+    description: 'Name of the board config folder to build (e.g. ExampleController),'
+    required: true
+  source-path:
+    description: 'Path (relative to the workspace) to an existing GP2040-CE checkout. When empty, upstream-repo is checked out at upstream-tag into ./gp2040-ce'
+    required: false
+    default: ''
+  upstream-tag:
+    description: 'GP2040-CE release tag/ref to check out. Required when source-path is empty'
+    required: false
+    default: ''
+  upstream-repo:
+    description: 'GP2040-CE repository to check out (owner/repo). Only used when source-path is empty'
+    required: false
+    default: 'OpenStickCommunity/GP2040-CE'
+  config-path:
+    description: 'Optional path to a directory containing BoardConfig.h, the board header and assets/ to overlay into configs/<board-config>/'
+    required: false
+    default: ''
+  skip-web-build:
+    description: 'When "true", do not build the web configurator; lib/httpd/fsdata.c must already exist in the source (e.g. downloaded from an earlier job)'
+    required: false
+    default: 'false'
+  build-type:
+    description: 'CMake build type'
+    required: false
+    default: 'Release'
+
+outputs:
+  gp2040-ce-path:
+    description: 'Absolute path of the GP2040-CE source that was built'
+    value: ${{ steps.paths.outputs.source }}
+  firmware-path:
+    description: 'Absolute path to the built .uf2 firmware file'
+    value: ${{ steps.build.outputs.firmware }}
+  elf-path:
+    description: 'Absolute path to the built .elf file'
+    value: ${{ steps.build.outputs.elf }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve paths
+      id: paths
+      shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source-path }}
+        UPSTREAM_TAG: ${{ inputs.upstream-tag }}
+      run: |
+        if [[ -n "${SOURCE_PATH}" ]]; then
+          SOURCE=$(cd "${SOURCE_PATH}" && pwd)
+        else
+          if [[ -z "${UPSTREAM_TAG}" ]]; then
+            echo "::error::Either source-path or upstream-tag must be set."
+            exit 1
+          fi
+          SOURCE="${GITHUB_WORKSPACE}/gp2040-ce"
+        fi
+        echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
+        echo "pico-sdk=${GITHUB_WORKSPACE}/pico-sdk" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout GP2040-CE @ ${{ inputs.upstream-tag }}
+      if: inputs.source-path == ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.upstream-repo }}
+        ref: ${{ inputs.upstream-tag }}
+        path: gp2040-ce
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Overlay ${{ inputs.board-config }} config
+      if: inputs.config-path != ''
+      shell: bash
+      env:
+        BOARD_CONFIG: ${{ inputs.board-config }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        SOURCE: ${{ steps.paths.outputs.source }}
+      run: |
+        DEST="${SOURCE}/configs/${BOARD_CONFIG}"
+        rm -rf "${DEST}"
+        mkdir -p "${DEST}"
+        rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' "${CONFIG_PATH}/" "${DEST}/"
+
+    - name: Checkout pico-sdk/2.3.1
+      uses: actions/checkout@v4
+      with:
+        repository: raspberrypi/pico-sdk
+        ref: 2.3.1
+        path: pico-sdk
+
+    - name: Checkout pico-sdk submodules
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.pico-sdk }}
+      run: git submodule update --init
+
+    - name: Setup cmake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: "3.31.x"
+
+    - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
+      uses: carlosperate/arm-none-eabi-gcc-action@v1
+
+    - name: Use Node.js
+      if: inputs.skip-web-build != 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        cache-dependency-path: ${{ steps.paths.outputs.source }}/www/package-lock.json
+
+    - name: Build web configurator (fsdata.c)
+      if: inputs.skip-web-build != 'true'
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.source }}/www
+      run: |
+        npm ci
+        CI=false npm run build --if-present
+
+    - name: Verify prebuilt web configurator (fsdata.c)
+      if: inputs.skip-web-build == 'true'
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.source }}
+      run: |
+        if [[ ! -f lib/httpd/fsdata.c ]]; then
+          echo "::error::skip-web-build is true but lib/httpd/fsdata.c does not exist in the source."
+          exit 1
+        fi
+
+    - name: Configure CMake
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.source }}
+      env:
+        BOARD_CONFIG: ${{ inputs.board-config }}
+        BUILD_TYPE: ${{ inputs.build-type }}
+        PICO_SDK_PATH: ${{ steps.paths.outputs.pico-sdk }}
+      run: GP2040_BOARDCONFIG="${BOARD_CONFIG}" SKIP_WEBBUILD=TRUE cmake -B build -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+
+    - name: Build
+      id: build
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.source }}
+      env:
+        BOARD_CONFIG: ${{ inputs.board-config }}
+        BUILD_TYPE: ${{ inputs.build-type }}
+      run: |
+        GP2040_BOARDCONFIG="${BOARD_CONFIG}" cmake --build build --config "${BUILD_TYPE}" --parallel "$(nproc)"
+        FIRMWARE=$(ls "${PWD}"/build/GP2040-CE_*_"${BOARD_CONFIG}".uf2)
+        ELF=$(ls "${PWD}"/build/GP2040-CE_*_"${BOARD_CONFIG}".elf 2>/dev/null || true)
+        echo "firmware=${FIRMWARE}" >> "$GITHUB_OUTPUT"
+        echo "elf=${ELF}" >> "$GITHUB_OUTPUT"
